@@ -35,10 +35,12 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectWriter;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.github.victools.jsonschema.generator.Option;
 import com.github.victools.jsonschema.generator.SchemaGenerator;
 import com.github.victools.jsonschema.generator.SchemaGeneratorConfig;
 import com.github.victools.jsonschema.generator.SchemaGeneratorConfigBuilder;
 import com.github.victools.jsonschema.module.jackson.JacksonModule;
+import com.github.victools.jsonschema.module.jackson.JacksonOption;
 
 /**
  * An implementation of {@link StructuredOutputConverter} that transforms the LLM output
@@ -140,9 +142,10 @@ public class BeanOutputConverter<T> implements StructuredOutputConverter<T> {
 	 * Generates the JSON schema for the target type.
 	 */
 	private void generateSchema() {
-		JacksonModule jacksonModule = new JacksonModule();
+		JacksonModule jacksonModule = new JacksonModule(JacksonOption.RESPECT_JSONPROPERTY_REQUIRED);
 		SchemaGeneratorConfigBuilder configBuilder = new SchemaGeneratorConfigBuilder(DRAFT_2020_12, PLAIN_JSON)
-			.with(jacksonModule);
+			.with(jacksonModule)
+			.with(Option.FORBIDDEN_ADDITIONAL_PROPERTIES_BY_DEFAULT);
 		SchemaGeneratorConfig config = configBuilder.build();
 		SchemaGenerator generator = new SchemaGenerator(config);
 		JsonNode jsonNode = generator.generateSchema(this.typeRef.getType());
@@ -165,8 +168,25 @@ public class BeanOutputConverter<T> implements StructuredOutputConverter<T> {
 	 */
 	public T convert(@NonNull String text) {
 		try {
-			if (text.startsWith("```json") && text.endsWith("```")) {
-				text = text.substring(7, text.length() - 3);
+			// Remove leading and trailing whitespace
+			text = text.trim();
+
+			// Check for and remove triple backticks and "json" identifier
+			if (text.startsWith("```") && text.endsWith("```")) {
+				// Remove the first line if it contains "```json"
+				String[] lines = text.split("\n", 2);
+				if (lines[0].trim().equalsIgnoreCase("```json")) {
+					text = lines.length > 1 ? lines[1] : "";
+				}
+				else {
+					text = text.substring(3); // Remove leading ```
+				}
+
+				// Remove trailing ```
+				text = text.substring(0, text.length() - 3);
+
+				// Trim again to remove any potential whitespace
+				text = text.trim();
 			}
 			return (T) this.objectMapper.readValue(text, this.typeRef);
 		}
@@ -203,6 +223,14 @@ public class BeanOutputConverter<T> implements StructuredOutputConverter<T> {
 				```%s```
 				""";
 		return String.format(template, this.jsonSchema);
+	}
+
+	/**
+	 * Provides the generated JSON schema for the target type.
+	 * @return The generated JSON schema.
+	 */
+	public String getJsonSchema() {
+		return this.jsonSchema;
 	}
 
 }

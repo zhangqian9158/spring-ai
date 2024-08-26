@@ -23,11 +23,10 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.ai.anthropic.api.StreamHelper.ChatCompletionResponseBuilder;
 import org.springframework.ai.model.ChatModelDescription;
 import org.springframework.ai.model.ModelOptionsUtils;
+import org.springframework.ai.observation.conventions.AiProvider;
 import org.springframework.ai.retry.RetryUtils;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatusCode;
@@ -51,11 +50,12 @@ import reactor.core.publisher.Mono;
 /**
  * @author Christian Tzolov
  * @author Mariusz Bernacki
+ * @author Thomas Vitale
  * @since 1.0.0
  */
 public class AnthropicApi {
 
-	private static final Logger logger = LoggerFactory.getLogger(AnthropicApi.class);
+	public static final String PROVIDER_NAME = AiProvider.ANTHROPIC.value();
 
 	private static final String HEADER_X_API_KEY = "x-api-key";
 
@@ -91,7 +91,7 @@ public class AnthropicApi {
 	 * @param anthropicApiKey Anthropic api Key.
 	 */
 	public AnthropicApi(String baseUrl, String anthropicApiKey) {
-		this(baseUrl, anthropicApiKey, DEFAULT_ANTHROPIC_VERSION, RestClient.builder(),
+		this(baseUrl, anthropicApiKey, DEFAULT_ANTHROPIC_VERSION, RestClient.builder(), WebClient.builder(),
 				RetryUtils.DEFAULT_RESPONSE_ERROR_HANDLER);
 	}
 
@@ -103,8 +103,9 @@ public class AnthropicApi {
 	 * @param responseErrorHandler Response error handler.
 	 */
 	public AnthropicApi(String baseUrl, String anthropicApiKey, String anthropicVersion,
-			RestClient.Builder restClientBuilder, ResponseErrorHandler responseErrorHandler) {
-		this(baseUrl, anthropicApiKey, anthropicVersion, restClientBuilder, responseErrorHandler,
+			RestClient.Builder restClientBuilder, WebClient.Builder webClientBuilder,
+			ResponseErrorHandler responseErrorHandler) {
+		this(baseUrl, anthropicApiKey, anthropicVersion, restClientBuilder, webClientBuilder, responseErrorHandler,
 				DEFAULT_ANTHROPIC_BETA_VERSION);
 	}
 
@@ -117,8 +118,8 @@ public class AnthropicApi {
 	 * @param anthropicBetaFeatures Anthropic beta features.
 	 */
 	public AnthropicApi(String baseUrl, String anthropicApiKey, String anthropicVersion,
-			RestClient.Builder restClientBuilder, ResponseErrorHandler responseErrorHandler,
-			String anthropicBetaFeatures) {
+			RestClient.Builder restClientBuilder, WebClient.Builder webClientBuilder,
+			ResponseErrorHandler responseErrorHandler, String anthropicBetaFeatures) {
 
 		Consumer<HttpHeaders> jsonContentHeaders = headers -> {
 			headers.add(HEADER_X_API_KEY, anthropicApiKey);
@@ -132,8 +133,7 @@ public class AnthropicApi {
 			.defaultStatusHandler(responseErrorHandler)
 			.build();
 
-		this.webClient = WebClient.builder()
-			.baseUrl(baseUrl)
+		this.webClient = webClientBuilder.baseUrl(baseUrl)
 			.defaultHeaders(jsonContentHeaders)
 			.defaultStatusHandler(HttpStatusCode::isError,
 					resp -> Mono.just(new RuntimeException("Response exception, Status: [" + resp.statusCode()
@@ -882,7 +882,7 @@ public class AnthropicApi {
 	public ResponseEntity<ChatCompletionResponse> chatCompletionEntity(ChatCompletionRequest chatRequest) {
 
 		Assert.notNull(chatRequest, "The request body can not be null.");
-		Assert.isTrue(!chatRequest.stream(), "Request must set the steam property to false.");
+		Assert.isTrue(!chatRequest.stream(), "Request must set the stream property to false.");
 
 		return this.restClient.post()
 			.uri("/v1/messages")
@@ -902,7 +902,7 @@ public class AnthropicApi {
 	public Flux<ChatCompletionResponse> chatCompletionStream(ChatCompletionRequest chatRequest) {
 
 		Assert.notNull(chatRequest, "The request body can not be null.");
-		Assert.isTrue(chatRequest.stream(), "Request must set the steam property to true.");
+		Assert.isTrue(chatRequest.stream(), "Request must set the stream property to true.");
 
 		AtomicBoolean isInsideTool = new AtomicBoolean(false);
 

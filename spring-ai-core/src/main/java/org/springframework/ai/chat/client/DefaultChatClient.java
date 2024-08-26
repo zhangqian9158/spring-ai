@@ -28,9 +28,12 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
-import reactor.core.publisher.Flux;
-
-import org.springframework.ai.model.Media;
+import org.springframework.ai.chat.client.advisor.observation.AdvisorObservationConvention;
+import org.springframework.ai.chat.client.advisor.observation.ObservableRequestResponseAdvisor;
+import org.springframework.ai.chat.client.observation.ChatClientObservationContext;
+import org.springframework.ai.chat.client.observation.ChatClientObservationConvention;
+import org.springframework.ai.chat.client.observation.ChatClientObservationDocumentation;
+import org.springframework.ai.chat.client.observation.DefaultChatClientObservationConvention;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
@@ -42,6 +45,7 @@ import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.chat.prompt.PromptTemplate;
 import org.springframework.ai.converter.BeanOutputConverter;
 import org.springframework.ai.converter.StructuredOutputConverter;
+import org.springframework.ai.model.Media;
 import org.springframework.ai.model.function.FunctionCallback;
 import org.springframework.ai.model.function.FunctionCallbackWrapper;
 import org.springframework.ai.model.function.FunctionCallingOptions;
@@ -51,6 +55,11 @@ import org.springframework.util.Assert;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.MimeType;
 import org.springframework.util.StringUtils;
+
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationRegistry;
+import io.micrometer.observation.contextpropagation.ObservationThreadLocalAccessor;
+import reactor.core.publisher.Flux;
 
 /**
  * The default implementation of {@link ChatClient} as created by the
@@ -64,6 +73,8 @@ import org.springframework.util.StringUtils;
  * @since 1.0.0
  */
 public class DefaultChatClient implements ChatClient {
+
+	private static final ChatClientObservationConvention DEFAULT_CHAT_CLIENT_OBSERVATION_CONVENTION = new DefaultChatClientObservationConvention();
 
 	private final ChatModel chatModel;
 
@@ -281,7 +292,7 @@ public class DefaultChatClient implements ChatClient {
 		}
 
 		protected <T> ResponseEntity<ChatResponse, T> doResponseEntity(StructuredOutputConverter<T> boc) {
-			var chatResponse = doGetChatResponse(this.request, boc.getFormat());
+			var chatResponse = doGetObservableChatResponse(this.request, boc.getFormat());
 			var responseContent = chatResponse.getResult().getOutput().getContent();
 			T entity = boc.convert(responseContent);
 
@@ -297,7 +308,7 @@ public class DefaultChatClient implements ChatClient {
 		}
 
 		private <T> T doSingleWithBeanOutputConverter(StructuredOutputConverter<T> boc) {
-			var chatResponse = doGetChatResponse(this.request, boc.getFormat());
+			var chatResponse = doGetObservableChatResponse(this.request, boc.getFormat());
 			var stringResponse = chatResponse.getResult().getOutput().getContent();
 			return boc.convert(stringResponse);
 		}
@@ -309,7 +320,23 @@ public class DefaultChatClient implements ChatClient {
 		}
 
 		private ChatResponse doGetChatResponse() {
-			return this.doGetChatResponse(this.request, "");
+			return this.doGetObservableChatResponse(this.request, "");
+		}
+
+		private ChatResponse doGetObservableChatResponse(DefaultChatClientRequestSpec inputRequest,
+				String formatParam) {
+
+			ChatClientObservationContext observationContext = new ChatClientObservationContext(inputRequest,
+					formatParam, false);
+
+			return ChatClientObservationDocumentation.AI_CHAT_CLIENT
+				.observation(inputRequest.customObservationConvention, DEFAULT_CHAT_CLIENT_OBSERVATION_CONVENTION,
+						() -> observationContext, inputRequest.observationRegistry)
+				.observe(() -> {
+					ChatResponse chatResponse = doGetChatResponse(inputRequest, formatParam);
+					return chatResponse;
+				});
+
 		}
 
 		private ChatResponse doGetChatResponse(DefaultChatClientRequestSpec inputRequest, String formatParam) {
@@ -395,6 +422,29 @@ public class DefaultChatClient implements ChatClient {
 		}
 
 		private Flux<ChatResponse> doGetFluxChatResponse(DefaultChatClientRequestSpec inputRequest) {
+			return Flux.deferContextual(contextView -> {
+				ChatClientObservationContext observationContext = new ChatClientObservationContext(inputRequest, "",
+						true);
+
+				Observation observation = ChatClientObservationDocumentation.AI_CHAT_CLIENT.observation(
+						inputRequest.customObservationConvention, DEFAULT_CHAT_CLIENT_OBSERVATION_CONVENTION,
+						() -> observationContext, inputRequest.observationRegistry);
+
+				observation.parentObservation(contextView.getOrDefault(ObservationThreadLocalAccessor.KEY, null))
+					.start();
+
+				// @formatter:off
+				return doGetFluxChatResponse2(inputRequest)
+					.doOnError(observation::error)
+					.doFinally(s -> {
+						observation.stop();
+					})
+					.contextWrite(ctx -> ctx.put(ObservationThreadLocalAccessor.KEY, observation));
+				// @formatter:on
+			});
+		}
+
+		private Flux<ChatResponse> doGetFluxChatResponse2(DefaultChatClientRequestSpec inputRequest) {
 
 			Map<String, Object> context = new ConcurrentHashMap<>();
 			context.putAll(inputRequest.getAdvisorParams());
@@ -426,9 +476,7 @@ public class DefaultChatClient implements ChatClient {
 				messages.add(userMessage);
 			}
 
-			if (advisedRequest.getChatOptions() instanceof
-
-			FunctionCallingOptions functionCallingOptions) {
+			if (advisedRequest.getChatOptions() instanceof FunctionCallingOptions functionCallingOptions) {
 				if (!advisedRequest.getFunctionNames().isEmpty()) {
 					functionCallingOptions.setFunctions(new HashSet<>(advisedRequest.getFunctionNames()));
 				}
@@ -470,6 +518,10 @@ public class DefaultChatClient implements ChatClient {
 
 	public static class DefaultChatClientRequestSpec implements ChatClientRequestSpec {
 
+		private final ObservationRegistry observationRegistry;
+
+		private final ChatClientObservationConvention customObservationConvention;
+
 		private final ChatModel chatModel;
 
 		private String userText = "";
@@ -493,6 +545,14 @@ public class DefaultChatClient implements ChatClient {
 		private final List<RequestResponseAdvisor> advisors = new ArrayList<>();
 
 		private final Map<String, Object> advisorParams = new HashMap<>();
+
+		private ObservationRegistry getObservationRegistry() {
+			return observationRegistry;
+		}
+
+		private ChatClientObservationConvention getCustomObservationConvention() {
+			return customObservationConvention;
+		}
 
 		public String getUserText() {
 			return userText;
@@ -541,13 +601,15 @@ public class DefaultChatClient implements ChatClient {
 		/* copy constructor */
 		DefaultChatClientRequestSpec(DefaultChatClientRequestSpec ccr) {
 			this(ccr.chatModel, ccr.userText, ccr.userParams, ccr.systemText, ccr.systemParams, ccr.functionCallbacks,
-					ccr.messages, ccr.functionNames, ccr.media, ccr.chatOptions, ccr.advisors, ccr.advisorParams);
+					ccr.messages, ccr.functionNames, ccr.media, ccr.chatOptions, ccr.advisors, ccr.advisorParams,
+					ccr.observationRegistry, ccr.customObservationConvention);
 		}
 
 		public DefaultChatClientRequestSpec(ChatModel chatModel, String userText, Map<String, Object> userParams,
 				String systemText, Map<String, Object> systemParams, List<FunctionCallback> functionCallbacks,
 				List<Message> messages, List<String> functionNames, List<Media> media, ChatOptions chatOptions,
-				List<RequestResponseAdvisor> advisors, Map<String, Object> advisorParams) {
+				List<RequestResponseAdvisor> advisors, Map<String, Object> advisorParams,
+				ObservationRegistry observationRegistry, ChatClientObservationConvention customObservationConvention) {
 
 			this.chatModel = chatModel;
 			this.chatOptions = chatOptions != null ? chatOptions.copy()
@@ -564,6 +626,8 @@ public class DefaultChatClient implements ChatClient {
 			this.media.addAll(media);
 			this.advisors.addAll(advisors);
 			this.advisorParams.putAll(advisorParams);
+			this.observationRegistry = observationRegistry;
+			this.customObservationConvention = customObservationConvention;
 		}
 
 		/**
@@ -571,7 +635,8 @@ public class DefaultChatClient implements ChatClient {
 		 * settings are replicated from this {@code ChatClientRequest}.
 		 */
 		public Builder mutate() {
-			DefaultChatClientBuilder builder = (DefaultChatClientBuilder) ChatClient.builder(chatModel)
+			DefaultChatClientBuilder builder = (DefaultChatClientBuilder) ChatClient
+				.builder(chatModel, this.observationRegistry, this.customObservationConvention)
 				.defaultSystem(s -> s.text(this.systemText).params(this.systemParams))
 				.defaultUser(u -> u.text(this.userText)
 					.params(this.userParams)
@@ -591,20 +656,33 @@ public class DefaultChatClient implements ChatClient {
 			var as = new DefaultAdvisorSpec();
 			consumer.accept(as);
 			this.advisorParams.putAll(as.getParams());
-			this.advisors.addAll(as.getAdvisors());
+			this.advisors.addAll(toObservableAdvisors(as.getAdvisors(), this.observationRegistry, null));
 			return this;
 		}
 
 		public ChatClientRequestSpec advisors(RequestResponseAdvisor... advisors) {
 			Assert.notNull(advisors, "the advisors must be non-null");
-			this.advisors.addAll(List.of(advisors));
+			this.advisors.addAll(toObservableAdvisors(List.of(advisors), this.observationRegistry, null));
 			return this;
 		}
 
 		public ChatClientRequestSpec advisors(List<RequestResponseAdvisor> advisors) {
 			Assert.notNull(advisors, "the advisors must be non-null");
-			this.advisors.addAll(advisors);
+			this.advisors.addAll(toObservableAdvisors(advisors, this.observationRegistry, null));
 			return this;
+		}
+
+		private List<RequestResponseAdvisor> toObservableAdvisors(List<RequestResponseAdvisor> advisors,
+				ObservationRegistry observationRegistry, AdvisorObservationConvention customObservationConvention) {
+			if (CollectionUtils.isEmpty(advisors)) {
+				return advisors;
+			}
+			List<RequestResponseAdvisor> observableAdvisors = new ArrayList<>();
+			for (RequestResponseAdvisor advisor : advisors) {
+				observableAdvisors.add(new ObservableRequestResponseAdvisor(advisor, observationRegistry,
+						customObservationConvention));
+			}
+			return observableAdvisors;
 		}
 
 		public ChatClientRequestSpec messages(Message... messages) {
@@ -756,7 +834,8 @@ public class DefaultChatClient implements ChatClient {
 						adviseRequest.userParams(), adviseRequest.systemText(), adviseRequest.systemParams(),
 						adviseRequest.functionCallbacks(), adviseRequest.messages(), adviseRequest.functionNames(),
 						adviseRequest.media(), adviseRequest.chatOptions(), adviseRequest.advisors(),
-						adviseRequest.advisorParams());
+						adviseRequest.advisorParams(), inputRequest.getObservationRegistry(),
+						inputRequest.getCustomObservationConvention());
 			}
 
 			return advisedRequest;

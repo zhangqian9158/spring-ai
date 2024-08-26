@@ -55,8 +55,6 @@ public class WeaviateVectorStoreIT {
 	static WeaviateContainer weaviateContainer = new WeaviateContainer("semitechnologies/weaviate:1.25.4")
 		.waitingFor(Wait.forHttp("/v1/.well-known/ready").forPort(8080));
 
-	;
-
 	private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
 		.withUserConfiguration(TestApplication.class);
 
